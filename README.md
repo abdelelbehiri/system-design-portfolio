@@ -1,2 +1,11 @@
-# system-design-portfolio
-A collection of system designs I created for real-world projects, covering architecture decisions, trade-offs, and scalability considerations.
+# System Design Portfolio
+
+A collection of system designs I created for real-world projects, covering architecture decisions, trade-offs, and scalability considerations. Each write-up documents the requirements, architecture, data model, critical design decisions, failure modes, and paths for scaling the system.
+
+## Designs
+
+| Design | Summary | Key challenge |
+| --- | --- | --- |
+| [Doctor Appointment Booking System](doctor-appointment-booking/) | Search for practitioners and manage appointment reservations, bookings, cancellations, and rescheduling. | Combining eventually consistent search with strongly consistent booking to prevent double reservations. |
+
+<!-- Add new designs as rows in the table above. -->
