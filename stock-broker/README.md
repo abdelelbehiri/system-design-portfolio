@@ -1,29 +1,44 @@
 # Retail Stock Broker
 
-![Original design for the retail stock broker: requirements, data model, API, architecture, dispatch and reconciliation](architecture-original.svg)
+[![Open the design board in Miro](https://img.shields.io/badge/Open%20the%20design%20board%20in-Miro-FFD02F?style=for-the-badge&logo=miro&logoColor=050038)](https://miro.com/app/board/uXjVH1rW-1M=/?share_link_id=903962015389)
 
-The write-up below refines the original design; the main changes are listed in [section 7](#7-notes).
+**[View the original design board on Miro](https://miro.com/app/board/uXjVH1rW-1M=/?share_link_id=903962015389)** (view only): requirements, data model, API, architecture, dispatch idempotency and reconciliation.
 
-## 1. Product Scope
+The write-up below refines the original design; the main changes are listed in [section 6](#6-notes).
 
-The system is the backend of a mobile retail brokerage app. Users watch live stock prices and place, track, and cancel buy and sell orders, which the broker routes to an external exchange. The core design challenge is combining a read-heavy, highly available price stream with an order flow that must never lose, duplicate, or misreport an order while depending on an external exchange that is slow, expensive to call, and can fail with an unknown outcome.
+## 1. Product Requirements
 
-### In scope
+### Functional requirements
 
-- Streaming live prices for the stocks a user is viewing.
-- Placing market and limit orders, buy and sell.
-- Cancelling open orders.
-- Checking buying power (cash) and positions (shares) before an order reaches the exchange.
-- Processing executions, including partial fills.
-- Reconciling local order state with the exchange.
+- User can see live prices of stocks.
+- User can manage orders of stocks.
 
-### Out of scope
+### Non-functional requirements
 
-- User onboarding, KYC, and deposits and withdrawals.
-- Settlement and custody (T+1/T+2 delivery of cash and securities).
-- Charts, historical prices, news, and portfolio analytics.
-- Advanced order types (stop, stop-limit, trailing) and fractional shares.
-- Market making or internal order matching; all orders are routed to the exchange.
+- **High availability for price updates with eventual consistency.** The user should always be able to see stock prices and movements, but it is okay for prices to be stale for some seconds.
+- **Strong consistency for order management.** It is okay for the user not to be able to place an order for some time, but an order must never be in an inconsistent state.
+- **Low latency** for reflecting stock prices (under 200 ms) and for placing orders.
+- **Scalability:** 10 million daily active users, 5 trades per day, 1000s of stocks.
+- **Read-heavy system:** stock price updates >> trade orders.
+- **Minimize active connections to the external exchange API.** Calls to the external exchange API are expensive.
+
+### API
+
+```text
+GET    /subscribe?symbols=META,AAPL     → SSE stream: initial prices, then updates
+GET    /stock/{symbol}                  → Stock
+POST   /orders                          → 202 Accepted { orderId, state: "pending" }
+       Idempotency-Key: <uuid>
+       { side: "buy", symbol: "META", quantity: 5,
+         type: "limit", limitPriceCents: 52210 }
+DELETE /orders/{orderId}                → 202 Accepted { state: "pending_cancel" }
+GET    /orders?cursor=…                 → Order[] (paginated, with executions)
+```
+
+- The user and account come from the authenticated token, never from the request body, so a client cannot act on another account.
+- `POST /orders` returns `202 Accepted` because the order is accepted, not executed. The client learns about fills through `GET /orders` or order updates.
+- The `Idempotency-Key` makes client retries safe: a retried request returns the original `orderId` instead of creating a second order.
+- Prices and limits are integer cents, never floating point.
 
 ## 2. Clarifying Questions and Assumptions
 
@@ -40,29 +55,18 @@ The system is the backend of a mobile retail brokerage app. Users watch live sto
 - Prices favor availability and may be stale for a few seconds.
 - Orders require strong consistency. It is acceptable for a user to be temporarily unable to place an order; it is not acceptable for an order to be duplicated, lost, or shown in the wrong state, or for a user to spend cash or shares they do not have.
 - PostgreSQL is the source of truth for orders, executions, balances, and positions. The exchange is the source of truth for whether an order exists and what was executed.
-- Exchange-specific protocols (FIX, REST, WebSocket) sit behind adapters; the design assumes the exchange accepts a client order ID and reports executions by webhook.
+### The exchange interface
 
-## 3. Requirements
+The exchange's interface shapes most of the design, so it is pinned down first. The design assumes:
 
-### Functional requirements
+- **Order API:** place and cancel orders synchronously by request and response. A placed order returns the exchange's order ID, and the request accepts a client order ID that the exchange uses for deduplication and echoes back in later events.
+- **Executions:** reported asynchronously by webhook, one event per execution with its own `execId`.
+- **Prices:** a market data feed per symbol that the broker subscribes to.
+- **Queries:** look up an order by client order ID, used by reconciliation.
 
-- Users can subscribe to live prices of stocks and receive an initial price on subscribe.
-- Users can place market and limit orders to buy or sell a number of shares.
-- Users can cancel an open order, including the unfilled remainder of a partially filled order.
-- Users can list their orders and see each order's current state and executions.
-- The system rejects an order when the user lacks the cash or shares to cover it.
+Exchange-specific protocols (FIX, REST, WebSocket) sit behind adapters, so the rest of the system sees only this interface.
 
-### Non-functional requirements
-
-- Never send the same order to the exchange twice.
-- Never lose an accepted order between the database and the dispatch queue.
-- Process cancels for an order strictly after its create.
-- Treat every exchange timeout as an unknown outcome, not a failure.
-- Make every webhook and consumer idempotent.
-- Keep the price path and the order path independently scalable and isolated from each other's failures.
-- Keep an auditable history of order state transitions and balance movements.
-
-## 4. Data Model
+## 3. Data Model
 
 ```text
 User {
@@ -86,7 +90,9 @@ Order {
   quantity
   limit_price_cents   // limit orders only
   filled_quantity
-  state               // see state machine below
+  idempotency_key     // from the client; unique per account
+  state               // pending | dispatching | submitted | partially_filled | filled |
+                      // pending_cancel | cancelling | cancelled | failed
   version
   created_at
   updated_at
@@ -133,26 +139,16 @@ Stock {
 }
 ```
 
-Order state machine:
-
-```text
-pending ──► dispatching ──► submitted ──► partially_filled ──► filled
-   │             │              │                │
-   │             └─► failed     └──────┬─────────┘
-   │          (definite reject)        ▼
-   │                             pending_cancel ──► cancelling ──► cancelled
-   └──► cancelled  (cancelled before dispatch, no exchange call)
-```
-
 Important constraints:
 
 - Money is stored as integer cents (`price_cents`, `limit_price_cents`) to avoid floating-point rounding.
 - `Execution.exec_id` is the primary key, so a duplicate webhook cannot apply the same fill twice.
 - `Order.external_order_id` is unique and indexed. It replaces a separate key-value store for `externalOrderId → (orderId, userId)`, which would be a second write that can drift from the order row.
+- `(account_id, idempotency_key)` is unique, so a retried `POST /orders` cannot create a second order.
 - `Balance.available` has a check constraint `>= 0`. A reservation that would make it negative fails inside the transaction.
 - State transitions only move forward. Every update is guarded by the expected current state.
 
-## 5. Deep Dive
+## 4. Deep Dive
 
 ### Why the naive approach fails
 
@@ -260,7 +256,7 @@ Missed webhooks are recovered the same way: executions reported by the exchange 
 
 The Stock Price Processor keeps one connection per exchange feed regardless of user count, which satisfies the constraint on expensive exchange connections. Stocks Service instances subscribe to Redis channels on demand, so each price update is published once per symbol and delivered once per interested instance, not once per user. To protect clients and the network, instances conflate updates: if several ticks arrive for a symbol within a short window (for example 100 ms), only the latest is sent.
 
-## 6. Trade-offs and Scaling
+## 5. Trade-offs and Scaling
 
 ### Main trade-offs
 
@@ -307,7 +303,7 @@ The same core can serve as broker infrastructure that other apps (banks, neobank
 - **Audit trail:** an append-only log of every command and state transition, retained for regulatory reporting.
 - **End-of-day reconciliation** against the custodian and the exchange per tenant, with breaks reported and resolved before the next trading day.
 
-## 7. Notes
+## 6. Notes
 
 **What changed from the original Miro design?**
 Added buying-power and position reservations with a double-entry ledger; replaced the DB-then-Kafka dual write with a transactional outbox and CDC; keyed Kafka by account; treated exchange timeouts as unknown outcomes resolved by reconciliation instead of dead-lettering them; added an executions table for partial fills; dropped the separate order metadata key-value store in favour of an indexed column; added webhook verification; and completed the state list with `dispatching` and `cancelling`.
