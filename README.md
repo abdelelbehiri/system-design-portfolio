@@ -7,6 +7,6 @@ A collection of system designs I created for real-world projects, covering archi
 | Design | Summary | Key challenge |
 | --- | --- | --- |
 | [Doctor Appointment Booking System](doctor-appointment-booking/) | Search for practitioners and manage appointment reservations, bookings, cancellations, and rescheduling. | Combining eventually consistent search with strongly consistent booking to prevent double reservations. |
-| [Retail Stock Broker](stock-broker/) | Stream live stock prices and place, track, and cancel orders routed to an external exchange. | Never duplicating or losing an order when the exchange can time out with an unknown outcome, while reserving buying power before dispatch. |
+| [Stocks Broker](stock-broker/) | Stream live stock prices and place, track, and cancel orders routed to an external exchange. | Combining a highly available live price stream with strongly consistent orders: one dispatch per order across instances, and reconciliation with the exchange. |
 
 <!-- Add new designs as rows in the table above. -->
