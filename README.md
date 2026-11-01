@@ -8,5 +8,6 @@ A collection of system designs I created for real-world projects, covering archi
 | --- | --- | --- |
 | [Doctor Appointment Booking System](doctor-appointment-booking/) | Search for practitioners and manage appointment reservations, bookings, cancellations, and rescheduling. | Combining eventually consistent search with strongly consistent booking to prevent double reservations. |
 | [Stocks Broker](stock-broker/) | Stream live stock prices and place, track, and cancel orders routed to an external exchange. | Combining a highly available live price stream with strongly consistent orders: one dispatch per order across instances, and reconciliation with the exchange. |
+| [Payment System](payment-system/) _(in progress)_ | Let merchants create payment requests, charge customers' cards through external networks, and report payment status. | Keeping every transaction safe, durable and reconciled with the card networks at 10k TPS. |
 
 <!-- Add new designs as rows in the table above. -->
