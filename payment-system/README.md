@@ -1,6 +1,6 @@
 # Payment System
 
-> **Status: work in progress.** The requirements and data model are written up. The deep dives and trade-offs are still in progress.
+> **Status: work in progress.** The requirements, data model and the merchant authentication deep dive are written up. The remaining deep dives and trade-offs are still in progress.
 
 ![Original Excalidraw design for the payment system](architecture-original.svg)
 
@@ -26,6 +26,7 @@ Merchant {
   id
   name
   apiKey
+  secretKey
   metadata
 }
 
@@ -48,3 +49,53 @@ Transaction {
   metadata
 }
 ```
+
+## 3. Deep Dives and Trade-offs
+
+_In progress._
+
+What does "highly secure" mean in a payment system?
+
+1. Is the person or merchant making the payment request who they say they are?
+2. Are we protecting customers' personal information so that it can't be stolen or compromised?
+
+### Is the merchant who they say they are?
+
+How do we ensure the merchant is who they say they are?
+
+- **Authenticity:** the request really came from the registered merchant who wants to make a payment.
+- **Integrity:** the request data hasn't been tampered with.
+- **Replay attacks:** was this request replayed?
+
+**Request signing:** a combination of the merchant's `X-API-KEY` and private secret key is used to generate signatures.
+
+Example request:
+
+```text
+{
+  "method": "POST",
+  "path": "payment-intent/{paymentIntentId}/transactions",
+  "body": {
+    // some body ...
+  },
+  "headers": {
+    "X-API-KEY": "pk_live_51NzQRtGswQnXYZ8o",
+    "X-REQUEST-Timestamp": "2023-10-15T14:22:31Z", // the time the merchant wants to initiate the payment request
+    "X-REQUEST-Nonce": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "X-Signature": "....." // the result from HMAC-SHA256
+  }
+}
+```
+
+```text
+HMAC-SHA256(private_key, request) = signature
+"sha256=7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"
+```
+
+When the API Gateway receives a request, it:
+
+1. Retrieves the merchant's secret key based on the `X-API-KEY` (or Bearer token).
+2. Recreates the HMAC signature using the same algorithm (SHA-256), secret key and request data.
+3. Compares the calculated signature with the one provided in the request headers.
+4. Validates that the timestamp is within an acceptable time window (typically 5-15 minutes).
+5. Ensures the nonce hasn't been used before within the valid time window by checking the nonce cache in Redis (replay attack prevention).
